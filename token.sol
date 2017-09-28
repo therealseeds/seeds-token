@@ -12,7 +12,7 @@ contract admined {
     _;
   }
 
-  function transfeAdminship(address newAdmin) onlyAdmin {
+  function transferAdminship(address newAdmin) onlyAdmin {
     admin = newAdmin;
   }
 }
@@ -25,7 +25,7 @@ contract Token {
   uint8 public decimal;
   uint256 public totalSupply;
 
-  event Transfer(address indexed from, indexed to, uint256 value);
+  event Transfer(address indexed from, address indexed to, uint256 value);
 
   function Token(uint256 initialSupply, string tokenName, string tokenSymbol, uint8 decimalUnits) {
     balanceOf[msg.sender] = initialSupply;
@@ -65,7 +65,7 @@ contract AssetToken is admined, Token {
   }
 
   // For capped crowdsale
-  function tranfer(address _to, uint256 _value) {
+  function transfer(address _to, uint256 _value) {
     require(balanceOf[msg.sender] >= _value && balanceOf[_to] + _value >= balanceOf[_to]);
 
     balanceOf[msg.sender] -= _value;
