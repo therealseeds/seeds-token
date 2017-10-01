@@ -1,20 +1,19 @@
-pragma solidity ^0.4.16;
+pragma solidity ^0.4.13;
 
 contract token {
   function transfer(address receiver, uint amount);
-  function mintToken(address target, uint mintedAmount);
 }
 
 contract Crowdsale {
 
   enum State {
-    Fundraising, // Initial state
-    Failed, // Failed reaching the minimum target
-    Successful, // Completed but not transfered the fund to the funders
-    Closed // All completed
+    Open,
+    Closed,
+    TokensSoldOut,
+    Payed // Total raised transfered to beneficiary
   }
 
-  State public state = State.Fundraising;
+  State public state = State.Open;
 
   struct Contribution {
     uint amount;
@@ -23,39 +22,25 @@ contract Crowdsale {
 
   Contribution[] contributions;
 
-  uint public totalRaised;
-  uint public currentBalance;
+  uint public totalRaisedInWei;
+  uint public totalSdsUnits; // 1 Sds = 1000000000000000000 units (18 zeros)
+  uint public availableSdsUnits;
   uint public deadline; // timestamp
   uint public completedAt; // timestamp
-  uint public priceInWei; // Price of the token in WEI (smallest unit of Eth) 1 ETH = 1000000000000000000 WEI (18 zeros)
-  uint public fundingMinimumTargetInWei;
-  uint public fundingMaximumTargetInWei;
+  uint public priceOfUnitInWei; // Price of 1 Sds unit in WEI. 1 ETH = 1000000000000000000 WEI (18 zeros)
   address public creator;
-  address public beneficiary; // Can be a DAO or creator
+  address public beneficiary; // Can be wallet
   string public campaignUrl;
-  byte constant version = "1";
 
-  token public tokenReward; // Address that holds the smart contract of the token
+  token public sdsToken; // Address that holds the smart contract of the token
 
   event LogFundingReceived(address addr, uint amount, uint currentTotal);
   event LogBeneficiaryPaid(address beneficiary);
-  event LogFundingSuccessful(uint totalRaised);
-  event LogFunderInitialized(address creator, address beneficiary, string url, uint _fundingMaximumTargetInEther, uint deadline);
+  event LogFundingSuccessful(uint totalRaisedInWei);
+  event LogFunderInitialized(address creator, address beneficiary, string url, uint deadline);
 
   modifier inState(State _state) {
     require(state == _state);
-    _;
-  }
-
-  // This is for tokens that cannot be devided into multiple pieces
-  modifier isMinimum() {
-    require(msg.value > priceInWei); // The transfered amount has to be higher than min price for one token
-    _;
-  }
-
-  // This is for tokens that cannot be devided into multiple pieces
-  modifier inMultipleOfPrice() {
-    require(msg.value % priceInWei == 0); // The transfered amount has to be multiple of the price for one token
     _;
   }
 
@@ -66,117 +51,72 @@ contract Crowdsale {
 
   // Run only at least 1 hour after funding is completed
   modifier atEndOfLifeCycle() {
-    require((state == State.Failed || state == State.Successful) && completedAt + 1 hours < now);
+    require(state == State.Closed && completedAt + 1 hours < now);
     _;
   }
 
   function Crowdsale(
     uint _timeInMinutesForFundraising,
     string _campaignUrl,
-    address _ifSuccessfulSendTo, // Beneficiary
-    uint _fundingMaximumTargetInEther, // Set to 0 if no maximum - i.e. unlimited funding
-    uint _fundingMinimumTargetInEther,
-    token _addressOfToken, // Token used as a reward
-    uint _costOfEachTokenInWei
+    address _beneficiary, // Beneficiary address
+    token _addressOfSdsToken, // Token used as a reward
+    uint _priceOfUnitInWei,
+    uint _totalSdsUnits
   ) {
 
     creator = msg.sender;
-    beneficiary = _ifSuccessfulSendTo;
+    beneficiary = _beneficiary;
     campaignUrl = _campaignUrl;
-    fundingMaximumTargetInWei = _fundingMaximumTargetInEther * 1 ether;
-    fundingMinimumTargetInWei = _fundingMinimumTargetInEther * 1 ether;
     deadline = now + (_timeInMinutesForFundraising * 1 minutes);
-    currentBalance = 0;
-    totalRaised = 0;
-    tokenReward = token(_addressOfToken);
-    priceInWei = _costOfEachTokenInWei;
+    totalRaisedInWei = 0;
+    totalSdsUnits = _totalSdsUnits;
+    availableSdsUnits = _totalSdsUnits;
+    sdsToken = token(_addressOfSdsToken);
+    priceOfUnitInWei = _priceOfUnitInWei;
 
-    LogFunderInitialized(creator, beneficiary, campaignUrl, fundingMinimumTargetInWei, deadline);
+    LogFunderInitialized(creator, beneficiary, campaignUrl, deadline);
   }
 
-  function contribute()
-    public
-    inState(State.Fundraising)
-    payable // payble ensures that a function can be used to contribute Ether to the smart contract
-    returns (uint)
-  {
+  function () payable {
+
+    require(state == State.Open);
+    require(now <= deadline);
 
     uint amountInWei = msg.value;
-    contributions.push(Contribution({ amount: msg.value, contributor: msg.sender}));
-    totalRaised += msg.value;
-    currentBalance = totalRaised;
+    uint sdsUnitsRequested = amountInWei / priceOfUnitInWei;
 
-    if (fundingMaximumTargetInWei != 0) {
-      // Limited funding - upper cap
-      tokenReward.transfer(msg.sender, amountInWei / priceInWei);
-    } else {
-      // Unlimited funding
-      tokenReward.mintToken(msg.sender, amountInWei / priceInWei);
-    }
+    require(availableSdsUnits >= sdsUnitsRequested);
 
-    LogFundingReceived(msg.sender, msg.value, totalRaised);
+    contributions.push(Contribution({ amount: msg.value, contributor: msg.sender }));
+    totalRaisedInWei += msg.value;
 
-    checkIfFundingCompletedOrExpired();
+    sdsToken.transfer(msg.sender, sdsUnitsRequested);
+    availableSdsUnits -= sdsUnitsRequested;
 
-    return contributions.length - 1;
+    LogFundingReceived(msg.sender, msg.value, totalRaisedInWei);
+
+    checkStatus();
   }
 
-  function checkIfFundingCompletedOrExpired() {
-
-    if (fundingMaximumTargetInWei != 0 && totalRaised > fundingMaximumTargetInWei) { // There was a target and it has been achieved
-      state = State.Successful;
-      LogFundingSuccessful(totalRaised);
-
-      payout();
+  function checkStatus() {
+    if (availableSdsUnits == 0) {
+      state = State.TokensSoldOut;
+      LogFundingSuccessful(totalRaisedInWei);
       completedAt = now;
-    } else if (now > deadline) { // There was no target and deadline is expired
-
-      if (totalRaised >= fundingMinimumTargetInWei) { // Min target achieved
-        state = State.Successful;
-        LogFundingSuccessful(totalRaised);
-
-        payout();
-        completedAt = now;
-      } else { // Min target not achieved
-        state = State.Failed;
-        completedAt = now;
-      }
     }
   }
 
-  function payout()
+  function closeAndPayout()
     public
-    inState(State.Successful)
+    isCreator()
   {
-    require(beneficiary.send(this.balance));
+    require(now > deadline || state == State.TokensSoldOut);
 
+    LogFundingSuccessful(totalRaisedInWei);
     state = State.Closed;
-    currentBalance = 0;
+
+    require(beneficiary.send(this.balance));
     LogBeneficiaryPaid(beneficiary);
-  }
-
-  function getRefund()
-    public
-    inState(State.Failed)
-    returns (bool)
-  {
-    for (uint i = 0; i <= contributions.length; i++) {
-      if (contributions[i].contributor == msg.sender) {
-        uint amountToRefund = contributions[i].amount;
-        contributions[i].amount = 0;
-
-        if (!contributions[i].contributor.send(amountToRefund)) {
-          // Send failed
-          contributions[i].amount = amountToRefund;
-          return false;
-        } else {
-          totalRaised -= amountToRefund;
-          currentBalance = totalRaised;
-          return true;
-        }
-      }
-    }
-    return false; // Sender not found
   }
 
   function removeContract()
@@ -186,6 +126,4 @@ contract Crowdsale {
   {
     selfdestruct(msg.sender);
   }
-
-  function () { revert(); }
 }
